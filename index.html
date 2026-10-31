@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Trick or Treat Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, sans-serif; overscroll-behavior: none; }
+  #map { position: fixed; inset: 0; }
+  #panel {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
+    margin: 12px; margin-bottom: max(12px, env(safe-area-inset-bottom));
+    padding: 14px; border-radius: 20px;
+    background: rgba(255,255,255,.88); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 4px 20px rgba(0,0,0,.25);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .row { display: flex; gap: 10px; }
+  .stats { justify-content: space-between; font-weight: 600; font-size: 17px; }
+  button {
+    flex: 1; border: 0; border-radius: 14px; padding: 14px 8px;
+    font-size: 17px; font-weight: 600; color: #fff; -webkit-tap-highlight-color: transparent;
+  }
+  button:active { opacity: .7; }
+  button:disabled { opacity: .35; }
+  #run { background: #007aff; }
+  #run.on { background: #ff3b30; }
+  #good { background: #34c759; }
+  #bad { background: #ff3b30; }
+  .small button { background: #e5e5ea; color: #333; font-size: 14px; padding: 9px; font-weight: 500; }
+  #msg { font-size: 13px; color: #c00; display: none; }
+  .pin { font-size: 24px; text-align: center; line-height: 34px; background: rgba(255,255,255,.9);
+         border-radius: 50%; width: 34px; height: 34px; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+  .me { width: 18px; height: 18px; background: #007aff; border: 3px solid #fff; border-radius: 50%;
+        box-shadow: 0 0 0 2px rgba(0,122,255,.35), 0 1px 4px rgba(0,0,0,.4); }
+  @media (prefers-color-scheme: dark) {
+    #panel { background: rgba(30,30,32,.88); color: #fff; }
+    .small button { background: #3a3a3c; color: #eee; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+  <div class="row stats">
+    <span id="dist">0 mi</span>
+    <span id="counts">🍫 0 &nbsp; 👎 0</span>
+  </div>
+  <div id="msg"></div>
+  <button id="run">▶ Start Run</button>
+  <div class="row">
+    <button id="good">👍 Good House</button>
+    <button id="bad">👎 Bad House</button>
+  </div>
+  <div class="row small">
+    <button id="undo">↩ Undo house</button>
+    <button id="clear">🗑 Clear all</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+(() => {
+  const KEY = 'trickOrTreatMap.v1';
+  const $ = id => document.getElementById(id);
+
+  // ---- state (saved to the phone so a refresh doesn't lose the night) ----
+  let state = { route: [], houses: [], dist: 0, tracking: false };
+  try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} };
+
+  // ---- map ----
+  const map = L.map('map', { zoomControl: false }).setView([44.8, -88.4], 3);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  const line = L.polyline(state.route, { color: '#007aff', weight: 6, opacity: .9, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+  const meMarker = L.marker([0, 0], { icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [18, 18] }), interactive: false });
+  const houseLayer = L.layerGroup().addTo(map);
+
+  let here = null;      // latest [lat, lng]
+  let following = true; // auto-center until the user drags the map
+  map.on('dragstart', () => following = false);
+
+  function pinIcon(good) {
+    return L.divIcon({ className: '', html: `<div class="pin">${good ? '🍫' : '👎'}</div>`, iconSize: [34, 34], iconAnchor: [17, 17] });
+  }
+  function drawHouses() {
+    houseLayer.clearLayers();
+    state.houses.forEach(h => L.marker([h.lat, h.lng], { icon: pinIcon(h.good) }).addTo(houseLayer));
+  }
+
+  // ---- UI ----
+  function miles(m) { return (m / 1609.344).toFixed(2) + ' mi'; }
+  function render() {
+    const good = state.houses.filter(h => h.good).length;
+    $('dist').textContent = '🚶 ' + miles(state.dist);
+    $('counts').innerHTML = `🍫 ${good} &nbsp; 👎 ${state.houses.length - good}`;
+    $('run').textContent = state.tracking ? '■ Stop Run' : '▶ Start Run';
+    $('run').classList.toggle('on', state.tracking);
+    $('good').disabled = $('bad').disabled = !here;
+    $('undo').disabled = !state.houses.length;
+    $('clear').disabled = state.tracking || (!state.route.length && !state.houses.length);
+    line.setLatLngs(state.route);
+    drawHouses();
+  }
+  function showMsg(t) { $('msg').textContent = t; $('msg').style.display = t ? 'block' : 'none'; }
+
+  // ---- location ----
+  const toRad = d => d * Math.PI / 180;
+  function haversine(a, b) {
+    const R = 6371000, dLat = toRad(b[0] - a[0]), dLng = toRad(b[1] - a[1]);
+    const x = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(x));
+  }
+
+  function onPosition(pos) {
+    showMsg('');
+    if (pos.coords.accuracy > 50) return;
+    const p = [pos.coords.latitude, pos.coords.longitude];
+    const first = !here;
+    here = p;
+    meMarker.setLatLng(p);
+    if (!map.hasLayer(meMarker)) meMarker.addTo(map);
+    if (first) map.setView(p, 18);
+    else if (following) map.panTo(p);
+
+    if (state.tracking) {
+      const last = state.route[state.route.length - 1];
+      if (last) {
+        const d = haversine(last, p);
+        if (d < 5) { render(); return; }       // ignore GPS jitter
+        state.dist += d;
+      }
+      state.route.push(p);
+      save();
+    }
+    render();
+  }
+  function onError(err) {
+    showMsg(err.code === 1
+      ? 'Location is blocked. In Settings → Privacy → Location Services → Safari Websites, choose "While Using", then reload.'
+      : 'Waiting for GPS…');
+  }
+
+  if ('geolocation' in navigator) {
+    navigator.geolocation.watchPosition(onPosition, onError, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+  } else {
+    showMsg('This browser has no location support.');
+  }
+
+  // Keep the screen awake while a run is active (supported in iOS 16.4+).
+  let wakeLock = null;
+  async function setWake(on) {
+    try {
+      if (on && 'wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+      else if (wakeLock) { await wakeLock.release(); wakeLock = null; }
+    } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.tracking) setWake(true);
+  });
+
+  // ---- buttons ----
+  $('run').onclick = () => {
+    if (state.tracking) {
+      state.tracking = false; setWake(false);
+    } else {
+      state.route = here ? [here] : [];   // fresh blue line from this moment
+      state.dist = 0;
+      state.tracking = true; following = true; setWake(true);
+      if (here) map.setView(here, 18);
+    }
+    save(); render();
+  };
+  function mark(good) {
+    if (!here) return;
+    state.houses.push({ lat: here[0], lng: here[1], good, t: Date.now() });
+    if (navigator.vibrate) navigator.vibrate(30);
+    save(); render();
+  }
+  $('good').onclick = () => mark(true);
+  $('bad').onclick = () => mark(false);
+  $('undo').onclick = () => { state.houses.pop(); save(); render(); };
+  $('clear').onclick = () => {
+    if (!confirm('Clear the route and all house pins?')) return;
+    state.route = []; state.houses = []; state.dist = 0; save(); render();
+  };
+
+  // resume a saved run
+  if (state.route.length) map.fitBounds(line.getBounds(), { padding: [40, 40] });
+  render();
+})();
+</script>
+</body>
+</html>
